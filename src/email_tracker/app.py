@@ -41,7 +41,7 @@ class EmailTrackerApp:
         self.gmail_service = GmailService(credentials_file=credentials_file)
         self.categorizer = EmailCategorizer()
         self.doc_reader = DocReader(credentials_file=credentials_file)
-        self.response_matcher = ResponseMatcher(similarity_threshold=0.4)
+        self.response_matcher = ResponseMatcher(similarity_threshold=0.35)
         self.sheets_logger = SheetsLogger(
             spreadsheet_id=spreadsheet_id,
             credentials_file=credentials_file,
@@ -56,6 +56,7 @@ class EmailTrackerApp:
         )
         self.dashboard = EmailTrackerDashboard(
             sheets_logger=self.sheets_logger,
+            scheduler=self.scheduler,
             port=dashboard_port,
         )
 

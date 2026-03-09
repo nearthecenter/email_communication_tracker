@@ -199,3 +199,100 @@ class GmailService:
         except HttpError as error:
             logger.error(f"Error archiving message: {error}")
             return False
+
+    def is_email_read(self, message_id: str) -> bool:
+        """Check if an email has been read (opened).
+        
+        Returns:
+            True if email is read (UNREAD label not present), False if unread
+        """
+        try:
+            message = self.service.users().messages().get(
+                userId="me",
+                id=message_id,
+                format="minimal"
+            ).execute()
+            
+            # Check if UNREAD label is present
+            labels = message.get("labelIds", [])
+            is_unread = "UNREAD" in labels
+            
+            logger.debug(f"Message {message_id} is {'unread' if is_unread else 'read'}")
+            return not is_unread
+        except HttpError as error:
+            logger.error(f"Error checking if message is read: {error}")
+            return False
+
+    def has_reply_sent(self, message_id: str) -> bool:
+        """Check if there's been a reply sent to this email.
+        
+        This looks for messages sent by the user that reference the original message.
+        
+        Returns:
+            True if a reply has been sent, False otherwise
+        """
+        try:
+            # Get the original message to extract thread ID or details
+            original_message = self.service.users().messages().get(
+                userId="me",
+                id=message_id,
+                format="minimal"
+            ).execute()
+            
+            # Get the thread ID
+            thread_id = original_message.get("threadId")
+            if not thread_id:
+                logger.warning(f"Could not find thread ID for message {message_id}")
+                return False
+            
+            # Get all messages in this thread
+            thread = self.service.users().threads().get(
+                userId="me",
+                id=thread_id,
+                format="minimal"
+            ).execute()
+            
+            messages = thread.get("messages", [])
+            
+            # Check if any message in the thread was sent by the user (has SENT label)
+            # and comes after the original message
+            original_date = original_message.get("internalDate")
+            
+            for msg in messages:
+                msg_labels = msg.get("labelIds", [])
+                msg_date = int(msg.get("internalDate", 0))
+                
+                # Check if message has SENT label and is after the original
+                if "SENT" in msg_labels and msg_date > int(original_date):
+                    logger.debug(f"Found reply in thread {thread_id}")
+                    return True
+            
+            logger.debug(f"No reply found in thread {thread_id}")
+            return False
+        except HttpError as error:
+            logger.error(f"Error checking for reply: {error}")
+            return False
+
+    def get_email_status(self, message_id: str) -> str:
+        """Determine the status of an email based on read status and replies.
+        
+        Returns:
+            "done" if reply has been sent
+            "ongoing" if email has been opened/read
+            "pending" if email is still unread
+        """
+        try:
+            # Check if there's a reply first
+            if self.has_reply_sent(message_id):
+                return "done"
+            
+            # Check if email has been read
+            if self.is_email_read(message_id):
+                return "ongoing"
+            
+            # Otherwise it's still pending
+            return "pending"
+        except Exception as e:
+            logger.error(f"Error determining email status: {e}")
+            return "pending"
+

@@ -28,7 +28,8 @@ class ResponseMatcher:
         """
         # Extract the main question from the email
         question_text = self._extract_question_text(email)
-        
+        logger.info(f"Extracted question text: {repr(question_text)}")
+
         # Parse Q&A pairs from document
         qa_pairs = self._parse_qa_pairs(document_content)
         
@@ -53,7 +54,13 @@ class ResponseMatcher:
             )
             return best_match
         else:
-            logger.info("No matching Q&A found")
+            # Log best score seen even when below threshold
+            if qa_pairs:
+                all_scores = [(q, self._calculate_similarity(question_text, q.lower().strip())) for q, _ in qa_pairs]
+                best = max(all_scores, key=lambda x: x[1])
+                logger.info(f"No matching Q&A found (best score: {best[1]:.2%} for '{best[0][:60]}')")
+            else:
+                logger.info("No matching Q&A found")
             return None, 0.0
 
     def _extract_question_text(self, email: Email) -> str:
@@ -64,8 +71,8 @@ class ResponseMatcher:
         # If subject is generic or very short, focus on body
         generic_subjects = ['inquiry', 'question', 'help', 'support', 'hi', 'hello', 'urgent', 'important', 'fwd:', 're:', 'fw:']
         
-        if (len(subject_lower) < 10 or 
-            any(subject_lower.startswith(generic) for generic in generic_subjects) or
+        if (len(subject_lower) < 10 or
+            any(generic in subject_lower for generic in generic_subjects) or
             subject_lower in generic_subjects):
             
             # For generic subjects, extract just the main question from body
@@ -76,9 +83,23 @@ class ResponseMatcher:
                 line = line.strip()
                 if not line:
                     continue
-                    
+
                 # Stop at signatures (common patterns)
-                if any(sig in line.lower() for sig in ['*', 'best regards', 'regards', 'sincerely', 'thanks', 'thank you', '--', '___']):
+                # For courtesy phrases like "thanks"/"thank you", only treat as a
+                # signature when they appear as a short standalone closing line
+                # (≤ 50 chars), not when embedded inside a longer question sentence.
+                line_lower = line.lower()
+                short_closings = {'thanks', 'thank you'}
+                # '*' alone is too broad — only treat a line of pure asterisks
+                # (e.g. "***") as a hard separator, not any line containing '*'
+                hard_sigs = ['best regards', 'regards,', 'sincerely,', '--', '___']
+                is_separator = all(c == '*' for c in line.replace(' ', ''))
+                is_hard_sig = is_separator or any(sig in line_lower for sig in hard_sigs)
+                is_short_closing = (
+                    any(sig in line_lower for sig in short_closings)
+                    and len(line) <= 50
+                )
+                if is_hard_sig or is_short_closing:
                     break
                     
                 # Stop at very short lines that might be signatures
@@ -96,58 +117,117 @@ class ResponseMatcher:
             body_lines = body.split('\n')[:3]  # First 3 lines only
             question_text = f"{email.subject} {' '.join(body_lines)}".strip()
         
-        return question_text.lower().strip()
+        return self._strip_noise_words(question_text.lower().strip())
+
+    # Common greeting/closing phrases that add noise to similarity scoring
+    _NOISE_PHRASES = [
+        'hello!', 'hello', 'hi!', 'hi', 'good morning', 'good afternoon',
+        'good evening', 'good day', 'dear sir', 'dear ma\'am', 'dear sir or ma\'am',
+        'i want to ask', 'i would like to ask', 'i would like to inquire',
+        'i wanted to ask', 'may i ask', 'can i ask', 'i just want to ask',
+        'i just wanted to ask', 'thank you!', 'thank you', 'thanks!', 'thanks',
+        'i hope this finds you well', 'i hope you are doing well',
+    ]
+
+    def _strip_noise_words(self, text: str) -> str:
+        """Remove common greeting/closing phrases that dilute similarity scores."""
+        import re
+        for phrase in self._NOISE_PHRASES:
+            # Match phrase as a whole unit (with optional punctuation around it)
+            text = re.sub(r'\b' + re.escape(phrase) + r'\b[,.]?\s*', '', text, flags=re.IGNORECASE)
+        return text.strip()
+
+    # Stop-words that carry little meaning for FAQ matching
+    _STOP_WORDS = {
+        'a', 'an', 'the', 'is', 'it', 'in', 'of', 'to', 'for', 'and',
+        'or', 'do', 'if', 'my', 'me', 'we', 'i', 'be', 'at', 'on',
+        'with', 'this', 'that', 'are', 'was', 'will', 'what', 'how',
+        'why', 'when', 'where', 'who', 'get', 'have', 'has', 'been',
+        'not', 'no', 'its', 'by', 'from', 'as', 'up', 'so',
+        # common filler/polite words that add noise
+        'please', 'kindly', 'just', 'also', 'like', 'want', 'need',
+        'ask', 'know', 'thank', 'thanks', 'help', 'Dear',
+        # common verbs that don't help matching
+        'show', 'shows', 'send', 'try', 'use', 'used', 'goes', 'went',
+    }
 
     def _calculate_similarity(self, text1: str, text2: str) -> float:
-        """Calculate similarity between two texts using SequenceMatcher."""
-        # Break into sentences and check keyword overlap
-        words1 = set(text1.split())
-        words2 = set(text2.split())
+        """Calculate similarity between two texts.
+
+        Uses keyword coverage (how much of the shorter text's meaningful words
+        appear in the longer text) rather than Jaccard, so short email queries
+        are not penalised against longer FAQ questions.
+        """
+        def meaningful_words(text):
+            return set(
+                w.strip('!?,.:;()[]\'\"')
+                for w in text.lower().split()
+                if w.strip('!?,.:;()[]\'\"') and
+                   w.strip('!?,.:;()[]\'\"') not in self._STOP_WORDS and
+                   len(w.strip('!?,.:;()[]\'\"')) > 2
+            )
+
+        words1 = meaningful_words(text1)
+        words2 = meaningful_words(text2)
 
         if not words1 or not words2:
             return 0.0
 
-        # Calculate Jaccard similarity
         intersection = len(words1 & words2)
-        union = len(words1 | words2)
+        # Coverage: what fraction of the EMAIL's (text1) keywords appear in the FAQ question.
+        # Using text1 (email) as denominator avoids short FAQs with few keywords
+        # falsely dominating over more specific FAQs.
+        coverage = intersection / len(words1)
 
-        jaccard = intersection / union if union > 0 else 0.0
-
-        # Also use SequenceMatcher for partial string matching
+        # SequenceMatcher for partial string matching
         sequence_ratio = SequenceMatcher(None, text1, text2).ratio()
 
-        # Combine both metrics (60% Jaccard, 40% sequence)
-        combined_score = (jaccard * 0.6) + (sequence_ratio * 0.4)
-
-        return combined_score
+        # 65% coverage, 35% sequence
+        return (coverage * 0.65) + (sequence_ratio * 0.35)
 
     def _parse_qa_pairs(self, document_content: str) -> list:
-        """Parse Q&A pairs from document content."""
+        """Parse Q&A pairs from document content.
+
+        Handles two formats:
+        1. Q and A on separate lines (standard)
+        2. Q and A on the same line: "Q: question?A: answer"
+        """
+        import re
         qa_pairs = []
         lines = document_content.split('\n')
         current_question = None
         current_answer = []
-        
+
         for line in lines:
             line = line.strip()
             if not line:
                 continue
-                
-            if line.startswith('Q:'):
+
+            # Handle case where Q: and A: are on the same line
+            if (line.startswith('Q:') or line.startswith('Q.')) and 'A:' in line:
+                # Save previous pair
+                if current_question and current_answer:
+                    qa_pairs.append((current_question, '\n'.join(current_answer)))
+                # Split on A: to separate question from answer
+                parts = re.split(r'A:', line, maxsplit=1)
+                current_question = parts[0][2:].strip()
+                current_answer = [parts[1].strip()] if len(parts) > 1 else []
+                # Save immediately if we have both
+                if current_question and current_answer:
+                    qa_pairs.append((current_question, '\n'.join(current_answer)))
+                    current_question = None
+                    current_answer = []
+            elif line.startswith('Q:') or line.startswith('Q.'):
                 # Save previous Q&A pair if exists
                 if current_question and current_answer:
                     qa_pairs.append((current_question, '\n'.join(current_answer)))
-                
-                # Start new question
-                current_question = line[2:].strip()  # Remove "Q:" prefix
+                current_question = line[2:].strip()
                 current_answer = []
             elif line.startswith('A:') and current_question:
-                # Start collecting answer
-                current_answer.append(line[2:].strip())  # Remove "A:" prefix
+                current_answer.append(line[2:].strip())
             elif current_question and current_answer:
-                # Continue collecting answer
                 current_answer.append(line)
-        
+
         # Save last Q&A pair
         if current_question and current_answer:
             qa_pairs.append((current_question, '\n'.join(current_answer)))

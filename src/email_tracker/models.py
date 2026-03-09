@@ -10,9 +10,10 @@ class EmailStatus(str, Enum):
     """Email status enum."""
     INCOMING = "incoming"
     PENDING = "pending"
+    ONGOING = "ongoing"  # Email opened/read
     ANSWERED = "answered"
     MANUAL_REPLY = "manual_reply"
-    DONE = "done"
+    DONE = "done"  # Reply sent (auto or manual)
 
 
 class Email(BaseModel):
@@ -46,7 +47,7 @@ class EmailLog(BaseModel):
     notes: Optional[str] = None
 
     @classmethod
-    def from_email(cls, email: Email) -> "EmailLog":
+    def create_from_email(cls, email: Email) -> "EmailLog":
         """Create log entry from Email model."""
         return cls(
             email_id=getattr(email, 'email_id', 'unknown'),

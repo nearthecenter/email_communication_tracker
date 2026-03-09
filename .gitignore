@@ -41,3 +41,11 @@ htmlcov/
 # Scripts
 scripts/
 *example.yaml
+
+# Google API credentials & tokens (never commit these)
+credentials.json
+token.pickle
+token*.pickle
+drive_token.pickle
+sheets_token.pickle
+*_token.pickle

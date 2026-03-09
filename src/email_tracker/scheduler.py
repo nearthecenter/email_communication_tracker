@@ -81,6 +81,10 @@ class EmailScheduler:
         self.is_running = True
         logger.info(f"Email scheduler started (checking every {interval_minutes} minutes)")
 
+        # Keep the event loop alive so APScheduler jobs can fire
+        while self.is_running:
+            await asyncio.sleep(60)
+
     async def stop(self) -> None:
         """Stop the email scheduler."""
         if self.is_running:
@@ -107,7 +111,7 @@ class EmailScheduler:
             email_logs = []
             for e in processed_emails:
                 try:
-                    log = EmailLog.from_email(e)
+                    log = EmailLog.create_from_email(e)
                     email_logs.append(log)
                 except Exception as log_error:
                     logger.error(f"Failed to create log for email {getattr(e, 'email_id', 'unknown')}: {log_error}")
@@ -143,6 +147,24 @@ class EmailScheduler:
     async def _process_single_email(self, email: Email) -> Email:
         """Process a single email."""
         try:
+            # First, check the current status of the email in Gmail
+            # (whether it's been opened or if there's a reply)
+            email_status_from_gmail = self.gmail_service.get_email_status(email.email_id)
+            
+            # If email already has a reply, mark it as done
+            if email_status_from_gmail == "done":
+                email.status = EmailStatus.DONE
+                email.reply_sent = True
+                logger.info(f"Email {email.email_id} has been replied to")
+                return email
+            
+            # If email has been opened, update status to ongoing
+            if email_status_from_gmail == "ongoing":
+                email.status = EmailStatus.ONGOING
+                logger.info(f"Email {email.email_id} has been opened/read")
+            else:
+                email.status = EmailStatus.PENDING
+            
             # Categorize email
             email.category = self.categorizer.categorize(email)
 
@@ -152,9 +174,8 @@ class EmailScheduler:
                     email, self.document_content
                 )
 
-                if matched_response and confidence >= 0.4:  # 40% confidence threshold
+                if matched_response and confidence >= 0.35:  # 35% confidence threshold
                     email.matched_response = matched_response
-                    email.status = EmailStatus.PENDING
 
                     # Send auto-reply
                     success = self.gmail_service.send_reply(
@@ -168,6 +189,9 @@ class EmailScheduler:
                         email.reply_sent = True
                         email.reply_sent_at = datetime.utcnow()
                         email.status = EmailStatus.DONE
+                        # Mark as read so it won't appear in unread on the next
+                        # scheduler run and we never send a duplicate reply.
+                        self.gmail_service.mark_as_read(email.email_id)
                         logger.info(f"Auto-reply sent for email {email.email_id}")
                     else:
                         email.status = EmailStatus.PENDING
@@ -175,12 +199,14 @@ class EmailScheduler:
                 else:
                     # No matching response found – leave the message unread
                     # so it will stay in the inbox for manual review.
-                    email.status = EmailStatus.MANUAL_REPLY
+                    if email.status != EmailStatus.ONGOING:
+                        email.status = EmailStatus.MANUAL_REPLY
                     self.gmail_service.mark_as_unread(email.email_id)
             else:
                 # Document not loaded, give up on this run and mark it read
                 # so we don't try infinitely until the document is available.
-                email.status = EmailStatus.PENDING
+                if email.status != EmailStatus.ONGOING:
+                    email.status = EmailStatus.PENDING
                 self.gmail_service.mark_as_read(email.email_id)
 
             return email
