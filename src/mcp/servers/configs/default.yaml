@@ -1,0 +1,18 @@
+servers:
+  - name: PromptsMCPServer
+    module: src.mcp.prompts.prompts
+    description: "MCP server for prompt templates and instruction generation"
+    enabled: true
+    host : 0.0.0.0
+    port : 18200
+    path : /sse
+    transport : 'sse'
+
+  - name: ToolsMCPServer
+    module: tasks.tools
+    description: "MCP server for web search, bash commands, file I/O, and document operations"
+    enabled: true
+    host : 0.0.0.0
+    port : 18201
+    path : /sse
+    transport : 'sse'
