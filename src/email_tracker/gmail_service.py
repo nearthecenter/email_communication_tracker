@@ -97,6 +97,11 @@ class GmailService:
             # Extract header information
             email_data = {
                 "email_id": message_id,
+                "thread_id": message.get("threadId"),
+                "message_header_id": next(
+                    (h["value"] for h in headers if h["name"] == "Message-ID"),
+                    None
+                ),
                 "from_email": next(
                     (h["value"] for h in headers if h["name"] == "From"),
                     "unknown@example.com"
@@ -134,22 +139,30 @@ class GmailService:
 
         return ""
 
-    def send_reply(self, to_email: str, subject: str, body: str, in_reply_to_id: str) -> bool:
-        """Send an email reply."""
+    def send_reply(self, to_email: str, subject: str, body: str,
+                   in_reply_to_id: str, thread_id: str = None,
+                   message_header_id: str = None) -> bool:
+        """Send an email reply into the same Gmail thread."""
         try:
             message = MIMEText(body)
             message["to"] = to_email
             message["subject"] = f"Re: {subject}"
-            message["In-Reply-To"] = in_reply_to_id
-            message["References"] = in_reply_to_id
+            # Use RFC 2822 Message-ID if available, otherwise fall back to Gmail ID
+            ref_id = message_header_id or in_reply_to_id
+            message["In-Reply-To"] = ref_id
+            message["References"] = ref_id
 
             raw_message = base64.urlsafe_b64encode(
                 message.as_bytes()
             ).decode("utf-8")
 
+            send_body = {"raw": raw_message}
+            if thread_id:
+                send_body["threadId"] = thread_id
+
             self.service.users().messages().send(
                 userId="me",
-                body={"raw": raw_message}
+                body=send_body
             ).execute()
 
             logger.info(f"Reply sent to {to_email}")

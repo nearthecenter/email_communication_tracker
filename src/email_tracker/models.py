@@ -19,6 +19,8 @@ class EmailStatus(str, Enum):
 class Email(BaseModel):
     """Email data model."""
     email_id: str = Field(..., description="Gmail message ID")
+    thread_id: Optional[str] = Field(None, description="Gmail thread ID")
+    message_header_id: Optional[str] = Field(None, description="RFC 2822 Message-ID header")
     from_email: str = Field(..., description="Sender email address")
     from_name: Optional[str] = Field(None, description="Sender name")
     subject: str = Field(..., description="Email subject")

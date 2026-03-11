@@ -177,12 +177,14 @@ class EmailScheduler:
                 if matched_response and confidence >= 0.35:  # 35% confidence threshold
                     email.matched_response = matched_response
 
-                    # Send auto-reply
+                    # Send auto-reply into the same thread
                     success = self.gmail_service.send_reply(
                         to_email=email.from_email,
                         subject=email.subject,
                         body=self._format_reply_body(matched_response),
                         in_reply_to_id=email.email_id,
+                        thread_id=email.thread_id,
+                        message_header_id=email.message_header_id,
                     )
 
                     if success:
@@ -219,11 +221,14 @@ class EmailScheduler:
     def _format_reply_body(self, response: str) -> str:
         """Format the reply body with a professional header."""
         header = (
-            "Thank you for your email.\n\n"
-            "Here's the information you requested:\n\n"
+            "Good day!\n\n"
+            "Thank you for reaching out to the UP Office of Alumni Relations. "
+            "Based on my available knowledge, here is my response to your inquiry:\n\n"
         )
         footer = (
-            "\n\nBest regards,\nAutomated Email Response System"
+            "\n\nShould you have further questions, feel free to reply to this email."
+            "\n\nWarm regards,\n"
+            "Automated UP-OAR Response System\n"
         )
         return header + response + footer
 
