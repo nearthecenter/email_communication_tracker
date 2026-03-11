@@ -65,57 +65,47 @@ class ResponseMatcher:
 
     def _extract_question_text(self, email: Email) -> str:
         """Extract the main question text from an email, filtering out signatures and noise."""
-        subject_lower = email.subject.lower().strip()
         body = email.body.strip()
-        
-        # If subject is generic or very short, focus on body
-        generic_subjects = ['inquiry', 'question', 'help', 'support', 'hi', 'hello', 'urgent', 'important', 'fwd:', 're:', 'fw:']
-        
-        if (len(subject_lower) < 10 or
-            any(generic in subject_lower for generic in generic_subjects) or
-            subject_lower in generic_subjects):
-            
-            # For generic subjects, extract just the main question from body
-            lines = body.split('\n')
-            question_lines = []
-            
-            for line in lines:
-                line = line.strip()
-                if not line:
-                    continue
 
-                # Stop at signatures (common patterns)
-                # For courtesy phrases like "thanks"/"thank you", only treat as a
-                # signature when they appear as a short standalone closing line
-                # (≤ 50 chars), not when embedded inside a longer question sentence.
-                line_lower = line.lower()
-                short_closings = {'thanks', 'thank you'}
-                # '*' alone is too broad — only treat a line of pure asterisks
-                # (e.g. "***") as a hard separator, not any line containing '*'
-                hard_sigs = ['best regards', 'regards,', 'sincerely,', '--', '___']
-                is_separator = all(c == '*' for c in line.replace(' ', ''))
-                is_hard_sig = is_separator or any(sig in line_lower for sig in hard_sigs)
-                is_short_closing = (
-                    any(sig in line_lower for sig in short_closings)
-                    and len(line) <= 50
-                )
-                if is_hard_sig or is_short_closing:
-                    break
-                    
-                # Stop at very short lines that might be signatures
-                if len(line) < 20 and any(char.isdigit() for char in line):
-                    break
-                    
-                question_lines.append(line)
-                # Limit to first few lines to avoid signatures
-                if len(question_lines) >= 3:
-                    break
-            
-            question_text = ' '.join(question_lines)
-        else:
-            # Use both subject and body, but limit body to avoid signatures
-            body_lines = body.split('\n')[:3]  # First 3 lines only
-            question_text = f"{email.subject} {' '.join(body_lines)}".strip()
+        # Always extract the meaningful content from the body first.
+        # The subject alone is unreliable (missing, generic, or unrelated),
+        # so we prioritise the body and only fall back to the subject when
+        # the body yields nothing useful.
+        lines = body.split('\n')
+        question_lines = []
+
+        for line in lines:
+            line = line.strip()
+            if not line:
+                continue
+
+            line_lower = line.lower()
+            short_closings = {'thanks', 'thank you'}
+            hard_sigs = ['best regards', 'regards,', 'sincerely,', '--', '___']
+            is_separator = all(c == '*' for c in line.replace(' ', ''))
+            # Gmail quote header: "On <date>, <name> wrote:" — stop before quoted reply
+            is_quote_header = (line_lower.startswith('on ') and line_lower.endswith('wrote:'))
+            is_hard_sig = is_separator or is_quote_header or any(sig in line_lower for sig in hard_sigs)
+            is_short_closing = (
+                any(sig in line_lower for sig in short_closings)
+                and len(line) <= 50
+            )
+            if is_hard_sig or is_short_closing:
+                break
+
+            # Stop at very short lines that look like contact/phone numbers
+            if len(line) < 20 and any(char.isdigit() for char in line):
+                break
+
+            question_lines.append(line)
+            if len(question_lines) >= 3:
+                break
+
+        question_text = ' '.join(question_lines)
+
+        # Fallback: if body gave nothing, use the subject
+        if not question_text.strip():
+            question_text = email.subject
         
         return self._strip_noise_words(question_text.lower().strip())
 

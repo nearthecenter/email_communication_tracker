@@ -97,8 +97,10 @@ class EmailScheduler:
         logger.info("Starting email processing job...")
 
         try:
-            # Fetch unread emails
-            unread_emails = self.gmail_service.get_unread_emails(max_results=20)
+            # Fetch unread emails (run blocking I/O in a thread so the event loop stays free)
+            unread_emails = await asyncio.to_thread(
+                self.gmail_service.get_unread_emails, 20
+            )
             logger.info(f"Found {len(unread_emails)} unread emails")
 
             processed_emails = []
@@ -149,7 +151,9 @@ class EmailScheduler:
         try:
             # First, check the current status of the email in Gmail
             # (whether it's been opened or if there's a reply)
-            email_status_from_gmail = self.gmail_service.get_email_status(email.email_id)
+            email_status_from_gmail = await asyncio.to_thread(
+                self.gmail_service.get_email_status, email.email_id
+            )
             
             # If email already has a reply, mark it as done
             if email_status_from_gmail == "done":
@@ -157,13 +161,14 @@ class EmailScheduler:
                 email.reply_sent = True
                 logger.info(f"Email {email.email_id} has been replied to")
                 return email
-            
-            # If email has been opened, update status to ongoing
+
+            # If email has already been read/opened, skip auto-reply and flag for manual handling
             if email_status_from_gmail == "ongoing":
-                email.status = EmailStatus.ONGOING
-                logger.info(f"Email {email.email_id} has been opened/read")
-            else:
-                email.status = EmailStatus.PENDING
+                email.status = EmailStatus.MANUAL_REPLY
+                logger.info(f"Email {email.email_id} already read — skipping auto-reply, flagged for manual handling")
+                return email
+
+            email.status = EmailStatus.PENDING
             
             # Categorize email
             email.category = self.categorizer.categorize(email)
@@ -174,17 +179,20 @@ class EmailScheduler:
                     email, self.document_content
                 )
 
+                email.match_score = round(confidence, 4)
+
                 if matched_response and confidence >= 0.35:  # 35% confidence threshold
                     email.matched_response = matched_response
 
                     # Send auto-reply into the same thread
-                    success = self.gmail_service.send_reply(
-                        to_email=email.from_email,
-                        subject=email.subject,
-                        body=self._format_reply_body(matched_response),
-                        in_reply_to_id=email.email_id,
-                        thread_id=email.thread_id,
-                        message_header_id=email.message_header_id,
+                    success = await asyncio.to_thread(
+                        self.gmail_service.send_reply,
+                        email.from_email,
+                        email.subject,
+                        self._format_reply_body(matched_response),
+                        email.email_id,
+                        email.thread_id,
+                        email.message_header_id,
                     )
 
                     if success:
@@ -193,7 +201,7 @@ class EmailScheduler:
                         email.status = EmailStatus.DONE
                         # Mark as read so it won't appear in unread on the next
                         # scheduler run and we never send a duplicate reply.
-                        self.gmail_service.mark_as_read(email.email_id)
+                        await asyncio.to_thread(self.gmail_service.mark_as_read, email.email_id)
                         logger.info(f"Auto-reply sent for email {email.email_id}")
                     else:
                         email.status = EmailStatus.PENDING
@@ -203,13 +211,13 @@ class EmailScheduler:
                     # so it will stay in the inbox for manual review.
                     if email.status != EmailStatus.ONGOING:
                         email.status = EmailStatus.MANUAL_REPLY
-                    self.gmail_service.mark_as_unread(email.email_id)
+                    await asyncio.to_thread(self.gmail_service.mark_as_unread, email.email_id)
             else:
                 # Document not loaded, give up on this run and mark it read
                 # so we don't try infinitely until the document is available.
                 if email.status != EmailStatus.ONGOING:
                     email.status = EmailStatus.PENDING
-                self.gmail_service.mark_as_read(email.email_id)
+                await asyncio.to_thread(self.gmail_service.mark_as_read, email.email_id)
 
             return email
         except Exception as e:
@@ -222,11 +230,12 @@ class EmailScheduler:
         """Format the reply body with a professional header."""
         header = (
             "Good day!\n\n"
-            "Thank you for reaching out to the UP Office of Alumni Relations. "
-            "Based on my available knowledge, here is my response to your inquiry:\n\n"
+            "Thank you for reaching out to the UP Office of Alumni Relations.\n\n "
+        
         )
         footer = (
-            "\n\nShould you have further questions, feel free to reply to this email."
+            "\n\nShould you have further questions, feel free to email in another thread."
+            "\n\nThis is auto-generated email. Do not reply."
             "\n\nWarm regards,\n"
             "Automated UP-OAR Response System\n"
         )

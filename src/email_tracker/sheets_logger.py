@@ -116,13 +116,14 @@ class SheetsLogger:
                     "Category",
                     "Status",
                     "Matched Response",
+                    "Match Score",
                     "Reply Sent",
                     "Reply Sent At",
                     "Notes",
                 ]
                 self.service.spreadsheets().values().update(
                     spreadsheetId=self.spreadsheet_id,
-                    range=f"{self.sheet_name}!A1:J1",
+                    range=f"{self.sheet_name}!A1:K1",
                     valueInputOption="RAW",
                     body={"values": [headers]}
                 ).execute()
@@ -130,31 +131,62 @@ class SheetsLogger:
         except HttpError as error:
             logger.error(f"Error adding headers: {error}")
 
+    def _get_sheet_id(self) -> int:
+        """Return the numeric sheet ID for the tracked sheet tab."""
+        meta = self.service.spreadsheets().get(
+            spreadsheetId=self.spreadsheet_id
+        ).execute()
+        for sheet in meta["sheets"]:
+            if sheet["properties"]["title"] == self.sheet_name:
+                return sheet["properties"]["sheetId"]
+        raise ValueError(f"Sheet '{self.sheet_name}' not found")
+
+    def _insert_rows_at_top(self, values: list) -> None:
+        """Insert rows immediately below the header row (newest first)."""
+        sheet_id = self._get_sheet_id()
+        n = len(values)
+
+        # 1. Insert n blank rows after the header (index 1 = row 2)
+        self.service.spreadsheets().batchUpdate(
+            spreadsheetId=self.spreadsheet_id,
+            body={"requests": [{
+                "insertDimension": {
+                    "range": {
+                        "sheetId": sheet_id,
+                        "dimension": "ROWS",
+                        "startIndex": 1,
+                        "endIndex": 1 + n,
+                    },
+                    "inheritFromBefore": False,
+                }
+            }]}
+        ).execute()
+
+        # 2. Write the data into those new rows
+        self.service.spreadsheets().values().update(
+            spreadsheetId=self.spreadsheet_id,
+            range=f"{self.sheet_name}!A2:K{1 + n}",
+            valueInputOption="RAW",
+            body={"values": values},
+        ).execute()
+
     def log_email(self, email_log: EmailLog) -> bool:
-        """Log a single email to Google Sheets."""
+        """Log a single email to Google Sheets (inserted at top)."""
         try:
-            values = [
-                [
-                    email_log.timestamp.isoformat(),
-                    email_log.email_id,
-                    email_log.from_email,
-                    email_log.subject,
-                    email_log.category,
-                    email_log.status,
-                    email_log.matched_response or "",
-                    str(email_log.reply_sent),
-                    email_log.reply_sent_at.isoformat() if email_log.reply_sent_at else "",
-                    email_log.notes or "",
-                ]
-            ]
-
-            self.service.spreadsheets().values().append(
-                spreadsheetId=self.spreadsheet_id,
-                range=f"{self.sheet_name}!A:J",
-                valueInputOption="RAW",
-                body={"values": values}
-            ).execute()
-
+            values = [[
+                email_log.timestamp.isoformat(),
+                email_log.email_id,
+                email_log.from_email,
+                email_log.subject,
+                email_log.category,
+                email_log.status,
+                email_log.matched_response or "",
+                f"{email_log.match_score:.1%}" if email_log.match_score is not None else "",
+                str(email_log.reply_sent),
+                email_log.reply_sent_at.isoformat() if email_log.reply_sent_at else "",
+                email_log.notes or "",
+            ]]
+            self._insert_rows_at_top(values)
             logger.info(f"Logged email {email_log.email_id} to Google Sheets")
             return True
         except HttpError as error:
@@ -162,7 +194,7 @@ class SheetsLogger:
             return False
 
     def log_emails(self, email_logs: List[EmailLog]) -> bool:
-        """Log multiple emails to Google Sheets in batch."""
+        """Log multiple emails to Google Sheets in batch (inserted at top)."""
         try:
             values = [
                 [
@@ -173,20 +205,14 @@ class SheetsLogger:
                     log.category,
                     log.status,
                     log.matched_response or "",
+                    f"{log.match_score:.1%}" if log.match_score is not None else "",
                     str(log.reply_sent),
                     log.reply_sent_at.isoformat() if log.reply_sent_at else "",
                     log.notes or "",
                 ]
                 for log in email_logs
             ]
-
-            self.service.spreadsheets().values().append(
-                spreadsheetId=self.spreadsheet_id,
-                range=f"{self.sheet_name}!A:J",
-                valueInputOption="RAW",
-                body={"values": values}
-            ).execute()
-
+            self._insert_rows_at_top(values)
             logger.info(f"Logged {len(email_logs)} emails to Google Sheets")
             return True
         except HttpError as error:

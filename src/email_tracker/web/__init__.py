@@ -82,7 +82,7 @@ class EmailTrackerDashboard:
             
             try:
                 logger.info("Manual email processing triggered")
-                await self.scheduler._process_emails()
+                asyncio.create_task(self.scheduler._process_emails())
                 return {
                     "status": "success",
                     "message": "Email processing started",

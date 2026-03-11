@@ -29,6 +29,7 @@ class Email(BaseModel):
     category: Optional[str] = Field(None, description="Auto-detected category")
     status: EmailStatus = Field(default=EmailStatus.INCOMING)
     matched_response: Optional[str] = Field(None, description="Matched response from docx if applicable")
+    match_score: Optional[float] = Field(None, description="FAQ match confidence score (0-1)")
     reply_sent: bool = Field(default=False)
     reply_body: Optional[str] = Field(None, description="Content of sent reply")
     reply_sent_at: Optional[datetime] = Field(None)
@@ -44,6 +45,7 @@ class EmailLog(BaseModel):
     category: str
     status: str
     matched_response: Optional[str] = None
+    match_score: Optional[float] = None
     reply_sent: bool
     reply_sent_at: Optional[datetime] = None
     notes: Optional[str] = None
@@ -58,6 +60,7 @@ class EmailLog(BaseModel):
             category=getattr(email, 'category', 'uncategorized') or "uncategorized",
             status=getattr(email, 'status', EmailStatus.INCOMING).value if hasattr(email, 'status') else 'incoming',
             matched_response=getattr(email, 'matched_response', None),
+            match_score=getattr(email, 'match_score', None),
             reply_sent=getattr(email, 'reply_sent', False),
             reply_sent_at=getattr(email, 'reply_sent_at', None),
             notes=getattr(email, 'notes', None),

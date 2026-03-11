@@ -3,6 +3,7 @@
 import base64
 import os
 import logging
+import time
 from typing import Optional, List
 from google.auth.transport.requests import Request
 from google.oauth2.service_account import Credentials
@@ -82,60 +83,78 @@ class GmailService:
             logger.error(f"An error occurred: {error}")
             return []
 
-    def _parse_message(self, message_id: str) -> Optional[Email]:
-        """Parse a Gmail message into Email object."""
-        try:
-            message = self.service.users().messages().get(
-                userId="me",
-                id=message_id,
-                format="full"
-            ).execute()
+    def _parse_message(self, message_id: str, max_retries: int = 3) -> Optional[Email]:
+        """Parse a Gmail message into Email object, with retry on transient errors."""
+        for attempt in range(max_retries):
+            try:
+                message = self.service.users().messages().get(
+                    userId="me",
+                    id=message_id,
+                    format="full"
+                ).execute()
 
-            headers = message["payload"]["headers"]
-            body_text = self._get_message_body(message)
+                headers = message["payload"]["headers"]
+                body_text = self._get_message_body(message)
 
-            # Extract header information
-            email_data = {
-                "email_id": message_id,
-                "thread_id": message.get("threadId"),
-                "message_header_id": next(
-                    (h["value"] for h in headers if h["name"] == "Message-ID"),
-                    None
-                ),
-                "from_email": next(
-                    (h["value"] for h in headers if h["name"] == "From"),
-                    "unknown@example.com"
-                ),
-                "subject": next(
-                    (h["value"] for h in headers if h["name"] == "Subject"),
-                    "(No Subject)"
-                ),
-                "body": body_text,
-            }
+                # Extract header information
+                email_data = {
+                    "email_id": message_id,
+                    "thread_id": message.get("threadId"),
+                    "message_header_id": next(
+                        (h["value"] for h in headers if h["name"] == "Message-ID"),
+                        None
+                    ),
+                    "from_email": next(
+                        (h["value"] for h in headers if h["name"] == "From"),
+                        "unknown@example.com"
+                    ),
+                    "subject": next(
+                        (h["value"] for h in headers if h["name"] == "Subject"),
+                        "(No Subject)"
+                    ),
+                    "body": body_text,
+                }
 
-            return Email(**email_data)
-        except Exception as e:
-            logger.error(f"Error parsing message {message_id}: {e}")
-            return None
+                return Email(**email_data)
+            except HttpError as e:
+                logger.error(f"Error parsing message {message_id}: {e}")
+                return None
+            except Exception as e:
+                if attempt < max_retries - 1:
+                    wait = 2 ** attempt  # 1s, 2s
+                    logger.warning(
+                        f"Transient error parsing message {message_id} "
+                        f"(attempt {attempt + 1}/{max_retries}): {e} — retrying in {wait}s"
+                    )
+                    time.sleep(wait)  # sync-safe: called from thread pool via asyncio.to_thread
+                else:
+                    logger.error(f"Error parsing message {message_id} after {max_retries} attempts: {e}")
+        return None
 
     def _get_message_body(self, message: dict) -> str:
-        """Extract text body from Gmail message."""
+        """Extract text body from Gmail message, handling nested multipart structures."""
         try:
-            if "parts" in message["payload"]:
-                parts = message["payload"]["parts"]
-                for part in parts:
-                    if part["mimeType"] == "text/plain":
-                        if "data" in part["body"]:
-                            return base64.urlsafe_b64decode(
-                                part["body"]["data"]
-                            ).decode("utf-8")
-            else:
-                if "data" in message["payload"]["body"]:
-                    return base64.urlsafe_b64decode(
-                        message["payload"]["body"]["data"]
-                    ).decode("utf-8")
+            return self._extract_plain_text(message["payload"]) or ""
         except Exception as e:
             logger.error(f"Error extracting message body: {e}")
+            return ""
+
+    def _extract_plain_text(self, payload: dict) -> str:
+        """Recursively search payload parts for a text/plain body."""
+        mime = payload.get("mimeType", "")
+
+        if mime == "text/plain":
+            data = payload.get("body", {}).get("data")
+            if data:
+                return base64.urlsafe_b64decode(data).decode("utf-8")
+            return ""
+
+        # Recurse into multipart containers
+        if mime.startswith("multipart"):
+            for part in payload.get("parts", []):
+                result = self._extract_plain_text(part)
+                if result:
+                    return result
 
         return ""
 
